@@ -1,0 +1,434 @@
+---
+title: "Assignment 1"
+author: "Calum Murphy"
+date: "2025-02-17"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+
+```
+
+## Install necessary libraries
+
+``` {r, include=FALSE}
+library(GA)
+library(quantmod)
+library(glue)
+library(tidyquant)
+```
+
+
+# Part 1
+
+## Building the portfolio
+
+For the portfolio I decided to select 10 different stocks from various different sectors.
+
+``` {r}
+stock_symbols <- c("AAPL", "MSFT", "JPM", "V", "TSLA", "WMT", "PFE", "NKE", "XOM", "NFLX")
+```
+
+
+## Generating return data
+
+``` {r}
+
+#head(return_data)
+stocks = lapply(stock_symbols, function(sym) {
+  dailyReturn(na.omit(getSymbols(sym, src="yahoo", from="2018-02-18", to="2025-02-17", auto.assign=FALSE)))
+})
+
+
+return_data = do.call(merge, stocks)
+
+colnames(return_data) <- stock_symbols
+
+```
+
+## Split return data into a training set and test set
+
+We will split the data into a training set which we will train the genetic algorithm on, and a test set which we will use to evaluate the genetic algorithm's performance on unseen ('future') data.
+
+``` {r}
+
+# 75% training set and 25% testing set
+cutoff <- round(0.75*nrow(return_data)) #Row where we will cut off training set
+
+training_return_data <- return_data[1:(cutoff-1),]
+testing_return_data <- return_data[cutoff:nrow(return_data),]
+
+testing_return_data[1,]
+```
+
+We can see that the cutoff date is the 15th of May 2023. Everything before this is the training set and everything after, and including, this date is the testing set.
+
+## Calculate Mean daily returns of training set
+
+``` {r}
+
+mean_daily_returns_train <- apply(training_return_data, 2, mean)
+mean_daily_returns_train
+
+```
+
+## Covariance Matrix
+
+``` {r}
+
+train_cov_matrix <- cov(training_return_data) * 252
+print(round(train_cov_matrix,6))
+
+```
+Examining the table we can see that covariance is generally in the porfolio which makes it suitable to train a genetic algorithm on.
+
+## Fitness Function
+
+A function that will maximise the sharpe ratio, a measure that calculates the proportion of a return based on the risk taken.
+``` {r}
+
+
+fitness_function <- function(weights){
+  weights <- weights / sum(weights)
+  portfolio_returns <- (sum(mean_daily_returns_train*weights) + 1)^252 - 1 #Annualised returns
+  portfolio_risk <- sqrt(t(weights) %*% (train_cov_matrix) %*% weights)
+  sharpe_ratio <- portfolio_returns/portfolio_risk
+  return(sharpe_ratio)
+}
+```
+
+## Genetic Algorithm
+
+Since we are dealing with floating point data, the type of genetic algorithm we will use is "real-valued".
+```{r}
+
+GA <- ga(
+  type = "real-valued",
+  fitness = fitness_function,
+  lower=rep(0,10), # Minimum weights for portfolio
+  upper=rep(1,10), # Maximum weights for portfolio
+  popSize = 250,
+  maxiter = 1000,
+  pcrossover = 0.7,
+  pmutation = 0.5
+)
+
+summary(GA)
+
+# Extract best weights
+optimal_weights <- GA@solution / sum(GA@solution) # Makes sum of weights equal to 1
+optimal_weights
+
+```
+A fitness function value of >1 indicates that the portfolio is generating more return per risk taken - ideal!
+
+
+
+
+## Evaluating the optimal weights against random weights and equal weights
+``` {r}
+
+optimal_weights <- matrix(optimal_weights, ncol = 1) # Transforms solution into a vector of weights
+glue('Optimal weights sharpe ratio: {round(fitness_function(optimal_weights),4)}')
+
+# Equal weights
+equal_weights <- rep(1, 10)
+glue('Equal rates sharpe ratio: {round(fitness_function(equal_weights),4)}')
+
+
+# Random weights
+random_sharpe_train <- 0
+best_random_weights <- NULL
+
+
+# Finds the best random weights on 1000 iterations
+
+for (i in 1:1000) {
+  
+  random_weights_train <- runif(n = length(stocks))
+  random_weights_train <- random_weights_train / sum(random_weights_train) #Ensure weights sum to 0
+  
+  sharpe_num = fitness_function(random_weights_train)
+  
+  if (sharpe_num > random_sharpe_train) {
+    random_sharpe_train <- sharpe_num
+    
+    best_random_weights <- random_weights_train
+  }
+}
+
+glue('Random weights sharpe ratio: {round(fitness_function(best_random_weights),4)}')
+```
+Genetic algorithm sharpe ratio is higher, therefore it performs better against randomly generated weights and equal weights on the training set.
+
+
+
+
+
+## Evaluate GA performance on future data (i.e. the test set)
+
+``` {r}
+
+# We first have to calculate mean returns of the test set
+mean_daily_returns_test <- apply(testing_return_data, 2, mean)
+
+# Also calculate the covariance matrix
+test_cov_matrix <- cov(testing_return_data) * 252
+
+# Similar to fitness function, this function returns sharpe ratio based on test data
+evaluate_weights <- function(weights) {
+  weights <- weights / sum(weights)
+  portfolio_returns_test <- (sum(mean_daily_returns_test * weights) + 1)^252 - 1 #Annualised returns of test set
+  portfolio_risk_test <- sqrt(t(weights) %*% (test_cov_matrix) %*% weights)
+  sharpe_ratio_test <- portfolio_returns_test/portfolio_risk_test
+  return(sharpe_ratio_test)
+  
+}
+
+glue('Optimal weights sharpe ratio on test data: {round(evaluate_weights(optimal_weights),4)}')
+
+random_sharpe_test <- 0
+
+best_weights_test <- NULL
+
+# Finds the best random weights on 1000 iterations on the test set
+
+for (i in 1:1000) {
+  
+  random_weights_test <- runif(n = length(stocks))
+  random_weights_test <- random_weights_test / sum(random_weights_test)
+  
+  sharpe_num = evaluate_weights(random_weights_test)
+  
+  if (sharpe_num > random_sharpe_test) {
+    random_sharpe_test <- sharpe_num
+    best_weights_test <- random_weights_test
+  }
+}
+
+glue('Equal weights sharpe ratio on test data: {round(evaluate_weights(equal_weights),4)}')
+
+glue('Random weights sharpe ratio on test data: {round(evaluate_weights(best_weights_test),4)}')
+```
+
+The optimal weights from the genetic algorithm still performs well on the test data, however, both the randomly generated and the equal weighted portfolios perform better than the optimal weights. This suggests that the genetic algorithm is overfitting on the training set i.e. performing well on the training set but failing to generalise well on new, unseen data. I tried playing around with the parameters but to no real avail. Initially, the overfitting was a lot more extreme so I increased the dataset to include more years which did help the genetic algorithm to generalise better. Increasing the dataset further didn't seem to help. One possible way to mitigate this would be to train the genetic algorithm every 6 months so it can constantly adapt to market changes and generalise better.
+
+
+
+
+
+
+## Exploring different weightings of risk and return
+
+For this section we will create two new fitness functions that will minimise risk and maximise returns and then train a genetic algorithm on these functions.
+
+### Maximising return
+
+``` {r}
+
+fitness_function_maximise_return <- function(weights){
+  weights <- weights / sum(weights)
+  portfolio_returns <- (sum(mean_daily_returns_train * weights) + 1)^252 - 1 #Annualised returns
+  return(portfolio_returns) # Returns portfolio returns instead of sharpe ratio
+  }
+
+GA_maximise_return <- ga(
+  type = "real-valued",
+  fitness = fitness_function_maximise_return,
+  lower=rep(0,10), # Minimum weights for portfolio
+  upper=rep(1,10), # Maximum weights for portfolio
+  popSize = 100,
+  maxiter = 1000
+)
+
+summary(GA_maximise_return)
+
+maximise_return_weights <- GA_maximise_return@solution / sum(GA_maximise_return@solution) # Makes sum of weights equal to 1
+maximise_return_weights <- matrix(maximise_return_weights, ncol = 1)
+
+glue('Sharpe ratio of maximised return portfolio: {round(fitness_function(maximise_return_weights),4)}')
+
+```
+  
+A fitness function value of >0.7 means that the expected returns of the portfolio is more than 70% a year which is very high. With a return rate this high, we expect high volatilty. The calculated sharpe ratio (using the fitness function defined above) is above 1. This suggests that the possible return may be worth the associated risk with this portfolio.     
+  
+  
+### Minimising risk
+
+``` {r}  
+  
+fitness_function_minimise_risk <- function(weights){
+  weights <- weights / sum(weights)
+  portfolio_risk <- sqrt(t(weights) %*% (train_cov_matrix) %*% weights)
+  return(-portfolio_risk) # Returning negative value will ensure GA finds the smallest risk
+}
+
+GA_minimise_risk <- ga(
+  type = "real-valued",
+  fitness = fitness_function_minimise_risk,
+  lower=rep(0,10), # Minimum weights for portfolio
+  upper=rep(1,10), # Maximum weights for portfolio
+  popSize = 100,
+  maxiter = 1000
+)
+  
+summary(GA_minimise_risk)
+
+minimise_risk_weights = GA_minimise_risk@solution / sum(GA_minimise_risk@solution)
+minimise_risk_weights <- matrix(minimise_risk_weights, ncol = 1)
+
+glue('Sharpe ratio of minimising risk portfolio: {round(fitness_function(minimise_risk_weights),4)}')
+
+```  
+The genetic algorithm looks to maximise the fitness function, so setting the fitness funcion to return a negative value ensured we were able to find a portfolio with very low risk. The risk is fairly low, 15-20%, but with risk this low we can't expect the returns to be that great. Calculating the sharpe ratio we can see that it is below 1 which tells us that this selection of weights may not be worth it as the returns aren't great enough to justify such minimal risk.   
+
+
+We can also see how the different weights perform on the test data
+``` {r}
+
+glue('Sharpe ratio of maximised return portfolio on test data: {round(evaluate_weights(maximise_return_weights),4)}')
+
+glue('Sharpe ratio of minimising risk portfolio on test data: {round(evaluate_weights(minimise_risk_weights),4)}')
+
+```
+On future data both portfolios perform well.
+
+#Part 2
+
+For this part we will select a portfolio from a pool of 50 stocks. The selection criteria I have decided to use is biggest mean daily return.
+``` {r}
+
+#Loads stok data using tidyquant
+pool_stocks <- tq_index("SP500")$symbol
+new_stocks_symbols <- sample(pool_stocks, 50)
+
+getSymbols(new_stocks_symbols, src="yahoo", from="2017-02-18", to="2023-05-14") #Cutoff date of training set
+
+new_stocks = lapply(new_stocks_symbols, function(sym) {
+  dailyReturn(na.omit(getSymbols(sym, from="2017-02-18", to="2025-02-17", auto.assign=FALSE)))
+})
+new_stock_data = do.call(merge, new_stocks)
+
+colnames(new_stock_data) <- new_stocks_symbols
+
+
+#Gets rid of NaN values
+new_stock_data <- new_stock_data[ , colSums(is.na(new_stock_data))==0]
+
+```
+
+
+## Fitness function
+
+This fitness function will maximise the mean of porfolio returns. (For this part I really struggled to keep the selection at 10 stocks. I tried to penalise portfolios that exceeded ten but I ended up just getting a value of 0 generated by the GA.)
+```{r}
+
+
+
+
+evaluate_stocks <- function(selection) {
+  
+  selected_stocks <- new_stock_data[, selection == 1]
+  portfolio_return <- apply(selected_stocks, 2, mean)
+  #Returns portfolio with best average return
+  
+  return(mean(portfolio_return))
+}
+
+
+ga_stocks <- ga(
+  type = "binary", 
+  fitness = evaluate_stocks, 
+  nBits = ncol(new_stock_data),  
+  popSize = 50,                  
+  maxiter = 200
+)
+
+summary(ga_stocks)
+
+stocks_to_select = ga_stocks@solution 
+```
+
+
+
+
+## Creating stock data on assets identified by genetic algorithm
+``` {r}
+
+stocks_to_select <- matrix(stocks_to_select, ncol = 1) 
+new_stock_data <- new_stock_data[,stocks_to_select==1]
+
+```
+
+
+#Calculating new mean returns
+``` {r}
+new_mean_returns <- apply(new_stock_data, 2, mean)
+
+```
+
+
+
+## Calculating new covariance matrix
+``` {r}
+new_cov_matrix <- cov(new_stock_data) * 252
+```
+
+
+
+
+
+This fitness function is almost identical to the one defined above but instead takes new_mean_returns to calculate the portfolio returns.
+``` {r}
+new_fitness_function <- function(weights){
+  weights <- weights / sum(weights)
+  portfolio_returns <- (sum(new_mean_returns*weights) + 1)^252 - 1 #Annualised returns
+  portfolio_risk <- sqrt(t(weights) %*% (new_cov_matrix) %*% weights)
+  sharpe_ratio <- portfolio_returns/portfolio_risk
+  return(sharpe_ratio)
+}
+```
+
+
+## Repeat genetic algorithm for new portfolio
+
+``` {r}
+
+new_GA <- ga(
+  type = "real-valued",
+  fitness = new_fitness_function,
+  lower=rep(0, ncol(new_stock_data)), # Minimum weights for portfolio
+  upper=rep(1,ncol(new_stock_data)), # Maximum weights for portfolio
+  popSize = 10,
+  maxiter = 1000,
+  pcrossover = 0.7,
+  pmutation = 0.5
+)
+
+summary(new_GA)
+
+new_optimal_weights = new_GA@solution
+new_optimal_weights = new_optimal_weights/sum(new_optimal_weights)
+
+
+new_optimal_weights = matrix(new_optimal_weights, ncol=1)
+```
+
+## Evaluating new portfolio against old one
+
+``` {r}
+
+new_optimal_weights <- matrix(new_optimal_weights, ncol=1)
+
+glue('Old portfolio sharpe ratio: {round(fitness_function(optimal_weights),4)}')
+
+glue('New portfolio sharpe ratio: {round(new_fitness_function(new_optimal_weights),4)}')
+
+
+```
+
+
+
